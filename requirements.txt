@@ -3,3 +3,5 @@ requests
 beautifulsoup4
 duckduckgo-search
 wikipedia
+httpx
+feedparser
