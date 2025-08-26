@@ -388,16 +388,16 @@ def make_answer(pages: List[Page], query: str, max_sentences: int = 10) -> str:
         if len(words) > 1200:
             text = " ".join(words[:1200])
         corpus.append(text)
-    merged = "
-
-".join(corpus)
+    merged = "\n\n".join(corpus)
     base_summary = summarize(merged, max_sentences=max_sentences)
+
     q_tokens = tokenize(query)
     if q_tokens:
         sents = sent_split(base_summary)
         scored = [(sum(1 for t in tokenize(s) if t in q_tokens), s) for s in sents]
         scored.sort(key=lambda x: (-x[0], sents.index(x[1])))
         base_summary = " ".join([s for _, s in scored])
+
     return base_summary
 
 
