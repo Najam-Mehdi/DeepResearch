@@ -5,3 +5,6 @@ duckduckgo-search
 wikipedia
 httpx
 feedparser
+langdetect
+readability-lxml
+tldextract
