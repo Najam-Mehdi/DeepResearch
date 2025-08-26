@@ -22,7 +22,7 @@ import textwrap
 from collections import Counter
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 
 import streamlit as st
 
@@ -146,21 +146,61 @@ def is_probably_english(text: str) -> bool:
     return ascii_chars / max(1, len(text)) > 0.85
 
 
-async def translate_to_english(text: str, client: httpx.AsyncClient) -> str:
-    """Translate text to English using LibreTranslate public instances (no key)."""
+async def translate_to_english(text: str, client: httpx.AsyncClient, max_chunk: int = 1800) -> str:
+    """Translate text to English using free public services with chunking.
+    Tries LibreTranslate instances, then falls back to MyMemory. Returns original text on failure.
+    """
     if not text or is_probably_english(text):
         return text
-    payload = {"q": text, "source": "auto", "target": "en", "format": "text"}
-    # Try a couple of common public instances
-    for endpoint in ("https://libretranslate.de/translate", "https://translate.astian.org/translate"):
+
+    def _chunks(sentences: List[str], max_len: int) -> List[str]:
+        bucket, cur = [], ""
+        for s in sentences:
+            if len(cur) + len(s) + 1 > max_len:
+                if cur:
+                    bucket.append(cur)
+                cur = s
+            else:
+                cur = (cur + " " + s).strip()
+        if cur:
+            bucket.append(cur)
+        return bucket
+
+    sents = sent_split(clean_text(text))
+    parts = _chunks(sents if sents else [text], max_chunk)
+
+    async def _try_libre(chunk: str, endpoint: str) -> Optional[str]:
         try:
-            r = await client.post(endpoint, json=payload, timeout=30)
+            r = await client.post(endpoint, json={"q": chunk, "source": "auto", "target": "en", "format": "text"}, timeout=45)
+            if r.status_code == 200:
+                return r.json().get("translatedText")
+        except Exception:
+            return None
+        return None
+
+    async def _try_mymemory(chunk: str) -> Optional[str]:
+        try:
+            r = await client.get("https://api.mymemory.translated.net/get", params={"q": chunk, "langpair": "auto|en"}, timeout=45)
             if r.status_code == 200:
                 data = r.json()
-                return data.get("translatedText", text)
+                return (data.get("responseData") or {}).get("translatedText")
         except Exception:
-            continue
-    return text  # fallback
+            return None
+        return None
+
+    translated_parts: List[str] = []
+    for part in parts:
+        out = None
+        # Try multiple LibreTranslate community instances
+        for ep in ("https://libretranslate.de/translate", "https://translate.astian.org/translate", "https://translate.plausiblet.io/translate"):
+            out = await _try_libre(part, ep)
+            if out:
+                break
+        if not out:
+            out = await _try_mymemory(part)
+        translated_parts.append(out or part)
+
+    return " ".join(translated_parts) or text  # fallback
 
 
 def clean_text(text: str) -> str:
@@ -316,7 +356,7 @@ async def fetch_html(url: str, client: httpx.AsyncClient) -> str:
 
 
 @st.cache_data(show_spinner=False, ttl=60*60)
-def gather_pages(hits: List[Hit], translate: bool = True) -> List[Page]:
+def gather_pages(hits: List[Hit], translate: bool = True, english_only: bool = False) -> List[Page]:
     async def _run() -> List[Page]:
         pages: List[Page] = []
         async with httpx.AsyncClient() as client:
@@ -326,7 +366,9 @@ def gather_pages(hits: List[Hit], translate: bool = True) -> List[Page]:
                     continue
                 title, text, snippet = extract_from_html(html_text)
                 if not text or len(text.split()) < 80:
-                    # Skip very short contents
+                    continue
+                # Optionally filter out non-English sources early
+                if english_only and not is_probably_english(text):
                     continue
                 if translate:
                     text = await translate_to_english(text, client)
@@ -341,25 +383,21 @@ def gather_pages(hits: List[Hit], translate: bool = True) -> List[Page]:
 def make_answer(pages: List[Page], query: str, max_sentences: int = 10) -> str:
     corpus = []
     for p in pages:
-        # Light normalization
         text = p.text
-        # Trim extremely long pages per-source to avoid skew
         words = text.split()
         if len(words) > 1200:
             text = " ".join(words[:1200])
         corpus.append(text)
-    merged = "\n\n".join(corpus)
-    base_summary = summarize(merged, max_sentences=max_sentences)
+    merged = "
 
-    # Add a short, focused finalization step based on the query terms
+".join(corpus)
+    base_summary = summarize(merged, max_sentences=max_sentences)
     q_tokens = tokenize(query)
     if q_tokens:
-        # Slightly bias towards sentences containing query terms
         sents = sent_split(base_summary)
         scored = [(sum(1 for t in tokenize(s) if t in q_tokens), s) for s in sents]
         scored.sort(key=lambda x: (-x[0], sents.index(x[1])))
         base_summary = " ".join([s for _, s in scored])
-
     return base_summary
 
 
@@ -392,15 +430,16 @@ def sidebar_ui():
     st.sidebar.header("Settings")
     max_sources = st.sidebar.slider("Max sources to use", 3, 15, 8)
     timelimit = st.sidebar.selectbox("Time range", list(TIMELIMIT_MAP.keys()), index=0)
-    translate = st.sidebar.toggle("Force English translation", value=True, help="Uses LibreTranslate (free public instances).")
+    translate = st.sidebar.toggle("Force English translation", value=True, help="Uses LibreTranslate/MyMemory (free public instances).")
+    prefer_english = st.sidebar.toggle("Prefer English sources only", value=False)
     summary_len = st.sidebar.select_slider("Summary length (sentences)", options=[6,8,10,12,14], value=10)
     st.sidebar.markdown("---")
     st.sidebar.caption("Tip: refine your query with specific entities, time ranges, or filetypes (e.g., 'site:who.int vaccination 2023').")
-    return max_sources, timelimit, translate, summary_len
+    return max_sources, timelimit, translate, summary_len, prefer_english
 
 
 header_ui()
-max_sources, timelimit_label, do_translate, summary_len = sidebar_ui()
+max_sources, timelimit_label, do_translate, summary_len, prefer_english = sidebar_ui()
 
 query = st.text_input("What do you want to research?", placeholder="e.g., How do heat pumps compare to gas boilers for home heating in Europe?", help="Enter a topic, question, or comparison.")
 
@@ -419,7 +458,7 @@ if go and query.strip():
         st.stop()
 
     with st.spinner("Fetching and analyzing sources…"):
-        pages = gather_pages(hits, translate=do_translate)
+        pages = gather_pages(hits, translate=do_translate, english_only=prefer_english)
 
     if not pages:
         st.warning("Couldn't extract enough content from the sources. Try a different query or time range.")
@@ -442,6 +481,16 @@ if go and query.strip():
     # Summary
     with st.spinner("Synthesizing the answer…"):
         answer = make_answer(pages, query, max_sentences=summary_len)
+        # Ensure final answer is English when requested
+        if do_translate and not is_probably_english(answer):
+            async def _translate_answer():
+                async with httpx.AsyncClient() as client:
+                    return await translate_to_english(answer, client)
+            try:
+                answer = asyncio.run(_translate_answer())
+            except RuntimeError:
+                # Fallback if event loop already running
+                answer = answer
 
     st.subheader("Answer (English)")
     st.write(answer)
@@ -463,8 +512,11 @@ with st.expander("About this app"):
     st.markdown(
         """
         - **Free sources only**: uses DuckDuckGo search and filters common paywalls.
-        - **No API keys needed**: optional translation via public LibreTranslate instances.
+        - **No API keys needed**: optional translation via public LibreTranslate or MyMemory.
         - **Summarization**: custom extractive summarizer (TF‑IDF + MMR) for fast, local synthesis.
+        - **Notes**: Some sites block scraping or serve non-HTML; such pages are skipped.
+        - **Tip**: Turn on *Prefer English sources only* if auto-translation is slow or rate-limited.
+         for fast, local synthesis.
         - **Notes**: Some sites block scraping or serve non-HTML; such pages are skipped.
         """
     )
