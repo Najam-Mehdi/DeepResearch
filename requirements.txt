@@ -15,3 +15,6 @@ requests
 googlesearch-python
 lxml
 nltk
+
+transformers
+torch
