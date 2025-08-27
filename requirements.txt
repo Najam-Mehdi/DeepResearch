@@ -8,3 +8,10 @@ feedparser
 langdetect
 readability-lxml
 tldextract
+
+streamlit
+beautifulsoup4
+requests
+googlesearch-python
+lxml
+nltk
