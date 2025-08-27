@@ -1,4 +1,3 @@
-
 # app.py
 # A Streamlit web application for the Deep Research Tool.
 
@@ -12,48 +11,35 @@ from nltk.tokenize import sent_tokenize, word_tokenize
 from nltk.probability import FreqDist
 import re
 import time
-from transformers import pipeline
 
 # --- NLTK Data Download ---
+# This is a one-time setup for NLTK data.
 @st.cache_resource
 def download_nltk_data():
     """Downloads necessary NLTK data if not already present."""
     try:
         nltk.data.find('tokenizers/punkt')
         nltk.data.find('corpora/stopwords')
+        nltk.data.find('tokenizers/punkt_tab')
     except LookupError:
         st.info("Downloading necessary NLTK data for the first run...")
         nltk.download('punkt', quiet=True)
         nltk.download('stopwords', quiet=True)
+        nltk.download('punkt_tab', quiet=True)
         st.success("NLTK data downloaded successfully!")
 
 download_nltk_data()
 
-# --- Transformer Summarization Model ---
-@st.cache_resource
-def load_summarization_model():
-    """Loads a pre-trained summarization model from Hugging Face."""
-    st.info("Loading text summarization model...")
-    try:
-        summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
-        st.success("Summarization model loaded successfully!")
-        return summarizer
-    except Exception as e:
-        st.error(f"Failed to load summarization model: {e}")
-        st.warning("Falling back to NLTK-based summarizer.")
-        return None
-
-summarizer_pipeline = load_summarization_model()
-
 # --- Core Research Functions ---
-def search_google(query, num_results):
+
+def search_google(query, num_results=10):
     """
     Performs a Google search and returns URLs.
     """
     st.write(f"Searching for: '{query}'...")
     try:
-        # Add a random delay to avoid being blocked
-        time.sleep(time.uniform(1.5, 3.0))
+        # Add a small delay to avoid being blocked
+        time.sleep(2)
         return list(search(query, num_results=num_results, lang='en'))
     except Exception as e:
         st.error(f"An error occurred during search: {e}")
@@ -62,7 +48,7 @@ def search_google(query, num_results):
 
 def scrape_content(url, progress_bar):
     """
-    Scrapes textual content from a URL with robust error handling.
+    Scrapes textual content from a URL.
     """
     progress_bar.write(f"Scraping: {url}")
     try:
@@ -76,9 +62,12 @@ def scrape_content(url, progress_bar):
         for script_or_style in soup(["script", "style"]):
             script_or_style.decompose()
 
-        text = soup.get_text(separator=' ', strip=True)
-        # Simplified and robust text cleaning
-        text = re.sub(r'\s+', ' ', text)
+        text = soup.get_text()
+        lines = (line.strip() for line in text.splitlines())
+        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+        text = '\n'.join(chunk for chunk in chunks if chunk)
+        text = re.sub(r'\n\s*\n', '\n', text)
+        text = re.sub(r'[^a-zA-Z0-9\s.,-]', '', text)
         return text
     except requests.exceptions.RequestException as e:
         progress_bar.warning(f"Could not scrape {url}: {e}")
@@ -87,25 +76,13 @@ def scrape_content(url, progress_bar):
         progress_bar.error(f"An error occurred while processing {url}: {e}")
         return None
 
-def summarize_text_transformer(text, max_length=150, min_length=40):
+def summarize_text(text, num_sentences=5):
     """
-    Generates a summary using a Hugging Face Transformer model.
-    """
-    if not text:
-        return ""
-    try:
-        summary = summarizer_pipeline(text, max_length=max_length, min_length=min_length, do_sample=False)
-        return summary[0]['summary_text']
-    except Exception as e:
-        st.error(f"Summarization model failed: {e}. Falling back to NLTK.")
-        return summarize_text_nltk(text)
-
-def summarize_text_nltk(text, num_sentences=5):
-    """
-    Generates a summary using frequency-based analysis (NLTK fallback).
+    Generates a summary of the given text using frequency-based analysis.
     """
     if not text:
         return ""
+        
     sentences = sent_tokenize(text)
     if len(sentences) <= num_sentences:
         return ' '.join(sentences)
@@ -119,7 +96,7 @@ def summarize_text_nltk(text, num_sentences=5):
     for sentence in sentences:
         for word in word_tokenize(sentence.lower()):
             if word in freq:
-                if len(sentence.split(' ')) < 35:
+                if len(sentence.split(' ')) < 35: # Penalize very long sentences
                     if sentence not in sentence_scores:
                         sentence_scores[sentence] = freq[word]
                     else:
@@ -129,20 +106,20 @@ def summarize_text_nltk(text, num_sentences=5):
     return ' '.join(summary_sentences)
 
 # --- Streamlit App UI ---
+
 st.set_page_config(page_title="Deep Research Tool", layout="wide")
 st.title("🤖 Deep Research Tool")
 st.markdown("Enter a query to get a detailed report with citations from online sources.")
 
-# User controls
 query = st.text_input("Enter your research query:", placeholder="e.g., latest advancements in AI")
-num_sources = st.slider("Number of sources to search:", 5, 20, 10)
+
 if st.button("Start Research"):
     if not query:
         st.warning("Please enter a query to start the research.")
     else:
         # --- Step 1: Searching ---
         with st.spinner("Step 1: Searching for online sources..."):
-            urls = search_google(query, num_results=num_sources)
+            urls = search_google(query)
         
         if not urls:
             st.error("No search results found. Please try a different query.")
@@ -151,53 +128,35 @@ if st.button("Start Research"):
             
             # --- Step 2: Scraping and Processing ---
             scraped_sources = {}
-            report_text = f"Research Report for: {query}\n\n"
-            citations = []
+            progress_container = st.expander("Show Scraping Progress", expanded=True)
             
-            progress_container = st.empty()
-            progress_bar = progress_container.progress(0)
-            
-            st.subheader("Progress:")
-            
-            for i, url in enumerate(urls):
-                with st.empty():
-                    progress_text = f"Scraping and summarizing source {i+1} of {len(urls)}: {url}"
-                    st.write(progress_text)
-                    
-                content = scrape_content(url, st.container())
-                if content:
-                    summary = summarize_text_transformer(content) if summarizer_pipeline else summarize_text_nltk(content)
-                    if summary:
-                        scraped_sources[url] = summary
-                        citations.append(f"[{len(scraped_sources)}] {url}")
-                        report_text += f"Summary [{len(scraped_sources)}]:\n{summary}\n\n"
-                progress_bar.progress((i + 1) / len(urls))
-            
-            progress_container.empty()
-            st.success("All available sources processed!")
+            with st.spinner("Step 2: Scraping and summarizing content..."):
+                for i, url in enumerate(urls):
+                    content = scrape_content(url, progress_container)
+                    if content:
+                        scraped_sources[url] = content
             
             if not scraped_sources:
                 st.error("Could not retrieve content from any of the search results. This might be due to anti-scraping measures on the websites.")
             else:
-                # --- Step 3: Generating and Displaying Report ---
-                st.header("Research Report")
-                st.subheader(f"Query: {query}")
-                
-                for i, (url, summary) in enumerate(scraped_sources.items()):
-                    st.markdown(f"> {summary} **[{i+1}]**")
-                
-                st.subheader("Sources and Citations")
-                for citation in citations:
-                    st.markdown(f"- {citation}")
+                # --- Step 3: Generating Report ---
+                with st.spinner("Step 3: Compiling the research report..."):
+                    st.header("Research Report")
+                    st.subheader(f"Query: {query}")
                     
-                # Add a download button
-                report_text += "--- Sources ---\n" + '\n'.join(citations)
-                st.download_button(
-                    label="Download Report as Text",
-                    data=report_text,
-                    file_name=f"{query.replace(' ', '_')}_report.txt",
-                    mime="text/plain"
-                )
+                    report_content = ""
+                    citations = []
+                    
+                    st.subheader("Summary of Findings")
+                    for i, (url, content) in enumerate(scraped_sources.items()):
+                        summary = summarize_text(content, num_sentences=3)
+                        if summary:
+                            st.markdown(f"> {summary} **[{i+1}]**")
+                            citations.append(f"[{i+1}] {url}")
+                    
+                    st.subheader("Sources and Citations")
+                    for citation in citations:
+                        st.markdown(f"- {citation}")
                 
                 st.success("Report generation complete!")
                 st.balloons()
