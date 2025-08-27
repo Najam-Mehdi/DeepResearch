@@ -65,15 +65,26 @@ def search_google(query, num_results):
         st.warning("Google may have temporarily blocked this IP due to too many requests. Please try again later.")
         return []
 
+import time
+import random
+
 def scrape_content(url, progress_bar):
     """
     Scrapes textual content from a URL with robust error handling.
     """
     progress_bar.write(f"Scraping: {url}")
     try:
+        # A more comprehensive set of headers to mimic a real browser
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive'
         }
+        
+        # Introduce a random, human-like delay before each request
+        time.sleep(random.uniform(1.0, 4.0))
+
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
 
@@ -82,7 +93,6 @@ def scrape_content(url, progress_bar):
             script_or_style.decompose()
 
         text = soup.get_text(separator=' ', strip=True)
-        # Simplified and robust text cleaning
         text = re.sub(r'\s+', ' ', text)
         return text
     except requests.exceptions.RequestException as e:
