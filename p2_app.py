@@ -22,10 +22,12 @@ def download_nltk_data():
     try:
         nltk.data.find('tokenizers/punkt')
         nltk.data.find('corpora/stopwords')
+        nltk.data.find('tokenizers/punkt_tab') # Add this line
     except LookupError:
         st.info("Downloading necessary NLTK data for the first run...")
         nltk.download('punkt', quiet=True)
         nltk.download('stopwords', quiet=True)
+        nltk.download('punkt_tab', quiet=True) # Add this line
         st.success("NLTK data downloaded successfully!")
 
 download_nltk_data()
